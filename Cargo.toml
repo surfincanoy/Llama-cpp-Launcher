@@ -1,0 +1,18 @@
+[package]
+name = "llamacpp-laucher"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.31"
+egui = "0.31"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.15"
+ureq = { version = "3", features = ["json"] }
+webbrowser = "1"
+sys-locale = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
