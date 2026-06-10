@@ -77,6 +77,8 @@ pub fn start_server_async(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        kill_process_on_port(port);
+
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -117,37 +119,109 @@ pub fn start_server_async(
             });
         }
 
-        let host_clone = host.clone();
-        let wait_thread = std::thread::spawn(move || wait_for_server(&host_clone, port, 30));
+        let url = format!("http://{}:{}/v1/models", host, port);
+        let start = Instant::now();
+        let timeout = Duration::from_secs(30);
 
-        while let Ok(line) = log_rx.recv() {
+        let config = ureq::config::Config::builder()
+            .timeout_global(Some(Duration::from_secs(2)))
+            .build();
+        let agent = ureq::Agent::new_with_config(config);
+
+        let mut ready = false;
+        let mut timed_out = false;
+
+        loop {
+            while let Ok(line) = log_rx.try_recv() {
+                send(&line);
+            }
+
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {}
+                Err(_) => break,
+            }
+
+            if start.elapsed() >= timeout {
+                timed_out = true;
+                break;
+            }
+
+            if agent.get(&url).call().map(|r| r.status() == 200).unwrap_or(false) {
+                // Let any pending exit complete before trusting the health check
+                std::thread::sleep(Duration::from_millis(200));
+                match child.try_wait() {
+                    Ok(None) => {
+                        ready = true;
+                        // Collect remaining startup logs
+                        for _ in 0..5 {
+                            std::thread::sleep(Duration::from_millis(50));
+                            while let Ok(line) = log_rx.try_recv() {
+                                send(&line);
+                            }
+                        }
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        // Drain any remaining log lines
+        for line in log_rx.try_iter() {
             send(&line);
         }
 
-        let ready = wait_thread.join().unwrap_or(false);
-
         if ready {
             let ready_msg = match lang {
-                Lang::Zh => format!("llama-server 已就绪, 监听 {}:{}", host, port),
-                Lang::En => format!("llama-server ready, listening on {}:{}", host, port),
+                Lang::Zh => format!("llama-server 已就绪: http://{}:{}", host, port),
+                Lang::En => format!("llama-server ready: http://{}:{}", host, port),
             };
             send(&ready_msg);
             let _ = log_sender.send(ServerEvent::Started(ServerProcess { child }));
         } else {
-            let timeout_msg = match lang {
-                Lang::Zh => "llama-server 启动超时",
-                Lang::En => "llama-server start timeout",
-            };
-            send(timeout_msg);
             let _ = child.kill();
             let _ = child.wait();
-            let fail_msg = match lang {
-                Lang::Zh => "启动超时",
-                Lang::En => "start timeout",
+            let fail_msg = if timed_out {
+                match lang {
+                    Lang::Zh => format!("启动失败: 等待 {}:{} 超时 ({}s)", host, port, timeout.as_secs()),
+                    Lang::En => format!("start failed: waiting for {}:{} timeout ({}s)", host, port, timeout.as_secs()),
+                }
+            } else {
+                match lang {
+                    Lang::Zh => format!("启动失败: 端口 {}:{} 被占用", host, port),
+                    Lang::En => format!("start failed: port {}:{} in use", host, port),
+                }
             };
-            let _ = log_sender.send(ServerEvent::Failed(fail_msg.to_string()));
+            let _ = log_sender.send(ServerEvent::Failed(fail_msg));
         }
     });
+}
+
+fn kill_process_on_port(port: u16) {
+    let output = std::process::Command::new("fuser")
+        .arg("-n")
+        .arg("tcp")
+        .arg(port.to_string())
+        .stderr(std::process::Stdio::null())
+        .output();
+    let pid_str = match &output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => return,
+    };
+    if pid_str.is_empty() {
+        return;
+    }
+    for pid in pid_str.split_whitespace() {
+        if let Ok(pid) = pid.parse::<u32>() {
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .status();
+        }
+    }
+    std::thread::sleep(Duration::from_millis(200));
 }
 
 fn resolve_model_path(model_dir: &str, model_name: &str, lang: Lang) -> Result<String, String> {
@@ -214,27 +288,6 @@ pub fn stop_server(process: &mut ServerProcess, lang: Lang) -> Vec<String> {
         }
     }
     logs
-}
-
-fn wait_for_server(host: &str, port: u16, timeout_secs: u64) -> bool {
-    let url = format!("http://{}:{}/v1/models", host, port);
-    let start = Instant::now();
-    let timeout = Duration::from_secs(timeout_secs);
-
-    let config = ureq::config::Config::builder()
-        .timeout_global(Some(Duration::from_secs(2)))
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
-
-    while start.elapsed() < timeout {
-        if let Ok(resp) = agent.get(&url).call() {
-            if resp.status() == 200 {
-                return true;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    false
 }
 
 trait CommandExt {

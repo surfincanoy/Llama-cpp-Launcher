@@ -23,6 +23,9 @@ pub struct App {
     status: String,
     event_receiver: Option<mpsc::Receiver<ServerEvent>>,
     l10n: L10n,
+    port_text: String,
+    gpu_layers_text: String,
+    ctx_size_text: String,
 }
 
 impl Default for App {
@@ -34,6 +37,9 @@ impl Default for App {
             Vec::new()
         };
         let l10n = L10n::detect();
+        let port_text = config.port.to_string();
+        let gpu_layers_text = config.n_gpu_layers.to_string();
+        let ctx_size_text = config.ctx_size.to_string();
         Self {
             config,
             models,
@@ -42,6 +48,9 @@ impl Default for App {
             status: l10n.not_running().to_string(),
             event_receiver: None,
             l10n,
+            port_text,
+            gpu_layers_text,
+            ctx_size_text,
         }
     }
 }
@@ -98,6 +107,17 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_events();
+
+        // Sync text edits → config
+        if let Ok(v) = self.port_text.parse::<u16>() {
+            self.config.port = v;
+        }
+        if let Ok(v) = self.gpu_layers_text.parse::<u32>() {
+            self.config.n_gpu_layers = v;
+        }
+        if let Ok(v) = self.ctx_size_text.parse::<u32>() {
+            self.config.ctx_size = v;
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(8.0);
@@ -195,28 +215,25 @@ impl eframe::App for App {
 
                             ui.label(RichText::new(self.l10n.port()).color(TEXT_DIM));
                             ui.add(
-                                egui::DragValue::new(&mut self.config.port)
-                                    .range(1024..=65535)
-                                    .prefix("  ")
-                                    .suffix("  "),
+                                egui::TextEdit::singleline(&mut self.port_text)
+                                    .desired_width(110.0)
+                                    .font(egui::TextStyle::Monospace),
                             );
                             ui.end_row();
 
                             ui.label(RichText::new(self.l10n.gpu_layers()).color(TEXT_DIM));
                             ui.add(
-                                egui::DragValue::new(&mut self.config.n_gpu_layers)
-                                    .range(0..=1000)
-                                    .prefix("  ")
-                                    .suffix("  "),
+                                egui::TextEdit::singleline(&mut self.gpu_layers_text)
+                                    .desired_width(110.0)
+                                    .font(egui::TextStyle::Monospace),
                             );
                             ui.end_row();
 
                             ui.label(RichText::new(self.l10n.ctx_size()).color(TEXT_DIM));
                             ui.add(
-                                egui::DragValue::new(&mut self.config.ctx_size)
-                                    .range(512..=131072)
-                                    .prefix("  ")
-                                    .suffix("  "),
+                                egui::TextEdit::singleline(&mut self.ctx_size_text)
+                                    .desired_width(110.0)
+                                    .font(egui::TextStyle::Monospace),
                             );
                             ui.end_row();
                         });
@@ -237,78 +254,71 @@ impl eframe::App for App {
             ui.add_space(10.0);
 
             ui.horizontal(|ui| {
-                // Control card
-                let control = egui::Frame::new()
-                    .fill(SURFACE)
-                    .corner_radius(CornerRadius::same(10))
-                    .inner_margin(egui::Margin::symmetric(16, 8))
-                    .show(ui, |ui| {
-                        let running = self.is_running();
-                        let waiting = self.event_receiver.is_some();
-                        let start_enabled = !running
-                            && !waiting
-                            && !self.config.executable.is_empty()
-                            && !self.config.model_name.is_empty();
-                        let stop_enabled = running && self.event_receiver.is_none();
+                let control_resp = ui.horizontal(|ui| {
+                    let running = self.is_running();
+                    let waiting = self.event_receiver.is_some();
+                    let start_enabled = !running
+                        && !waiting
+                        && !self.config.executable.is_empty()
+                        && !self.config.model_name.is_empty();
+                    let stop_enabled = running && self.event_receiver.is_none();
 
-                        ui.horizontal(|ui| {
-                            ui.add_enabled_ui(start_enabled, |ui| {
-                                let btn = egui::Button::new(
-                                    RichText::new(self.l10n.start_server()).color(Color32::WHITE).strong(),
-                                )
-                                .fill(if start_enabled { GREEN } else { SURFACE_LIGHT })
-                                .corner_radius(CornerRadius::same(6))
-                                .min_size(Vec2::new(110.0, 28.0));
-                                if ui.add(btn).clicked() {
-                                    let msg = self.l10n.starting_server().to_string();
-                                    self.logs.clear();
-                                    self.add_log(&msg);
-                                    self.status = self.l10n.starting().to_string();
-                                    let (tx, rx) = mpsc::channel();
-                                    self.event_receiver = Some(rx);
-                                    let cfg = self.config.clone();
-                                    let lang = self.l10n.lang();
-                                    server::start_server_async(
-                                        cfg.executable,
-                                        cfg.model_dir,
-                                        cfg.model_name,
-                                        cfg.host,
-                                        cfg.port,
-                                        cfg.n_gpu_layers,
-                                        cfg.ctx_size,
-                                        lang,
-                                        tx,
-                                    );
-                                }
-                            });
-
-                            ui.add_space(12.0);
-
-                            ui.add_enabled_ui(stop_enabled, |ui| {
-                                let btn = egui::Button::new(
-                                    RichText::new(self.l10n.stop_server()).color(Color32::WHITE).strong(),
-                                )
-                                .fill(if stop_enabled { DANGER } else { SURFACE_LIGHT })
-                                .corner_radius(CornerRadius::same(6))
-                                .min_size(Vec2::new(110.0, 28.0));
-                            if ui.add(btn).clicked() {
-                                let msg = self.l10n.stopping_server().to_string();
-                                self.add_log(&msg);
-                                let lang = self.l10n.lang();
-                                if let Some(ref mut proc) = self.server_process {
-                                    let stop_logs = server::stop_server(proc, lang);
-                                        for log in &stop_logs {
-                                            self.add_log(log);
-                                        }
-                                    }
-                                self.server_process = None;
-                                self.status = self.l10n.not_running().to_string();
-                                }
-                            });
-                        });
+                    ui.add_enabled_ui(start_enabled, |ui| {
+                        let btn = egui::Button::new(
+                            RichText::new(self.l10n.start_server()).color(Color32::WHITE).strong(),
+                        )
+                        .fill(if start_enabled { GREEN } else { SURFACE_LIGHT })
+                        .corner_radius(CornerRadius::same(6))
+                        .min_size(Vec2::new(110.0, 28.0));
+                        if ui.add(btn).clicked() {
+                            let msg = self.l10n.starting_server().to_string();
+                            self.logs.clear();
+                            self.add_log(&msg);
+                            self.status = self.l10n.starting().to_string();
+                            let (tx, rx) = mpsc::channel();
+                            self.event_receiver = Some(rx);
+                            let cfg = self.config.clone();
+                            let lang = self.l10n.lang();
+                            server::start_server_async(
+                                cfg.executable,
+                                cfg.model_dir,
+                                cfg.model_name,
+                                cfg.host,
+                                cfg.port,
+                                cfg.n_gpu_layers,
+                                cfg.ctx_size,
+                                lang,
+                                tx,
+                            );
+                        }
                     });
 
-                let control_height = control.response.rect.height();
+                    ui.add_space(12.0);
+
+                    ui.add_enabled_ui(stop_enabled, |ui| {
+                        let btn = egui::Button::new(
+                            RichText::new(self.l10n.stop_server()).color(Color32::WHITE).strong(),
+                        )
+                        .fill(if stop_enabled { DANGER } else { SURFACE_LIGHT })
+                        .corner_radius(CornerRadius::same(6))
+                        .min_size(Vec2::new(110.0, 28.0));
+                        if ui.add(btn).clicked() {
+                            let msg = self.l10n.stopping_server().to_string();
+                            self.add_log(&msg);
+                            let lang = self.l10n.lang();
+                            if let Some(ref mut proc) = self.server_process {
+                                let stop_logs = server::stop_server(proc, lang);
+                                for log in &stop_logs {
+                                    self.add_log(log);
+                                }
+                            }
+                            self.server_process = None;
+                            self.status = self.l10n.not_running().to_string();
+                        }
+                    });
+                });
+
+                let control_height = control_resp.response.rect.height();
                 let remaining = ui.available_width();
                 ui.allocate_ui_with_layout(
                     Vec2::new(remaining, control_height),
@@ -346,15 +356,39 @@ impl eframe::App for App {
             ui.add_space(10.0);
 
             // Log area
-            ui.label(self.l10n.logs());
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .auto_shrink([false, false])
+            egui::Frame::new()
+                .fill(SURFACE)
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    for line in &self.logs {
-                        ui.label(egui::RichText::new(line).monospace());
-                    }
+                    ui.label(self.l10n.logs());
+                    egui::ScrollArea::vertical()
+                        .stick_to_bottom(true)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            for line in &self.logs {
+                                if let Some(start) = line.find("http://") {
+                                    let end = start + line[start..].find(|c: char| c.is_whitespace()).unwrap_or(line.len() - start);
+                                    let url = &line[start..end];
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 0.0;
+                                        if start > 0 {
+                                            ui.label(egui::RichText::new(&line[..start]).monospace());
+                                        }
+                                        ui.hyperlink_to(
+                                            egui::RichText::new(url).monospace(),
+                                            url,
+                                        );
+                                        if end < line.len() {
+                                            ui.label(egui::RichText::new(&line[end..]).monospace());
+                                        }
+                                    });
+                                } else {
+                                    ui.label(egui::RichText::new(line).monospace());
+                                }
+                            }
+                        });
                 });
 
             ui.add_space(8.0);
@@ -363,15 +397,21 @@ impl eframe::App for App {
 }
 
 fn setup_visuals(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.override_text_color = Some(TEXT);
-    visuals.panel_fill = BG;
-    visuals.window_fill = SURFACE;
-    visuals.extreme_bg_color = BG;
-    visuals.faint_bg_color = SURFACE;
-    ctx.set_visuals(visuals);
-
     let mut style = (*ctx.style()).clone();
+    let v = &mut style.visuals;
+    v.override_text_color = Some(TEXT);
+    v.panel_fill = BG;
+    v.window_fill = SURFACE;
+    v.extreme_bg_color = BG;
+    v.faint_bg_color = SURFACE;
+    v.widgets.noninteractive.bg_fill = SURFACE;
+    v.widgets.noninteractive.weak_bg_fill = SURFACE;
+    v.widgets.inactive.bg_fill = BG;
+    v.widgets.inactive.weak_bg_fill = BG;
+    v.widgets.hovered.bg_fill = SURFACE;
+    v.widgets.hovered.weak_bg_fill = SURFACE;
+    v.widgets.active.bg_fill = SURFACE_LIGHT;
+    v.widgets.active.weak_bg_fill = SURFACE_LIGHT;
     style.spacing.item_spacing = Vec2::new(8.0, 6.0);
     style.spacing.button_padding = Vec2::new(8.0, 4.0);
     ctx.set_style(style);
@@ -381,11 +421,20 @@ fn setup_chinese_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
 
     let font_paths = [
+        // Linux
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
         "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        // Windows
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\msyhbd.ttc",
+        "C:\\Windows\\Fonts\\simsun.ttc",
+        // macOS
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
     ];
 
     let mut loaded = false;
@@ -406,7 +455,6 @@ fn setup_chinese_fonts(ctx: &egui::Context) {
                 .or_default()
                 .insert(0, "chinese".to_owned());
             loaded = true;
-            eprintln!("已加载中文字体: {}", path);
             break;
         }
     }
