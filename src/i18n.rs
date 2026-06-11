@@ -77,6 +77,7 @@ impl L10n {
     }
 
     t_str!(exec_filter, "可执行文件", "Executable");
-
-
+    t_str!(mtp, "MTP (多 Token 预测)", "MTP (Multi-Token Prediction)");
+    t_str!(flash_attn, "Flash Attention", "Flash Attn");
+    t_str!(cmd_args, "命令行参数", "Command Line");
 }

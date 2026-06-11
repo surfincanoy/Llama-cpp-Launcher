@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub executable: String,
     pub model_dir: String,
@@ -11,6 +12,10 @@ pub struct Config {
     pub port: u16,
     pub n_gpu_layers: u32,
     pub ctx_size: u32,
+    pub mtp_enabled: bool,
+    pub spec_draft_n_max: u32,
+    pub flash_attn: String,
+    pub command_text: String,
 }
 
 impl Default for Config {
@@ -23,6 +28,10 @@ impl Default for Config {
             port: 11433,
             n_gpu_layers: 30,
             ctx_size: 4096,
+            mtp_enabled: false,
+            spec_draft_n_max: 2,
+            flash_attn: "auto".to_string(),
+            command_text: String::new(),
         }
     }
 }

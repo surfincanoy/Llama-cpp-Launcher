@@ -26,6 +26,8 @@ pub struct App {
     port_text: String,
     gpu_layers_text: String,
     ctx_size_text: String,
+    spec_nmax_text: String,
+    command_text: String,
 }
 
 impl Default for App {
@@ -40,6 +42,8 @@ impl Default for App {
         let port_text = config.port.to_string();
         let gpu_layers_text = config.n_gpu_layers.to_string();
         let ctx_size_text = config.ctx_size.to_string();
+        let spec_nmax_text = config.spec_draft_n_max.to_string();
+        let command_text = config.command_text.clone();
         Self {
             config,
             models,
@@ -51,6 +55,8 @@ impl Default for App {
             port_text,
             gpu_layers_text,
             ctx_size_text,
+            spec_nmax_text,
+            command_text,
         }
     }
 }
@@ -102,6 +108,127 @@ impl App {
             }
         }
     }
+    fn generate_command(&self) -> String {
+        let mut parts = Vec::new();
+        parts.push(self.config.executable.clone());
+        if !self.config.model_name.is_empty() {
+            let model_name = if self.config.model_name.ends_with(".gguf") {
+                self.config.model_name.clone()
+            } else {
+                format!("{}.gguf", self.config.model_name)
+            };
+            let model_path = format!("{}/{}", self.config.model_dir.trim_end_matches('/'), model_name);
+            parts.push("-m".to_string());
+            parts.push(model_path);
+        }
+        parts.push("--host".to_string());
+        parts.push(self.config.host.clone());
+        parts.push("--port".to_string());
+        parts.push(self.port_text.clone());
+        parts.push("-c".to_string());
+        parts.push(self.ctx_size_text.clone());
+        parts.push("--n-gpu-layers".to_string());
+        parts.push(self.gpu_layers_text.clone());
+        if self.config.mtp_enabled {
+            parts.push("--spec-type".to_string());
+            parts.push("draft-mtp".to_string());
+            parts.push("--spec-draft-n-max".to_string());
+            parts.push(self.spec_nmax_text.clone());
+        }
+        if self.config.flash_attn != "auto" {
+            parts.push(format!("--flash-attn={}", self.config.flash_attn));
+        }
+        parts.join(" ")
+    }
+
+    fn parse_command(&mut self, cmd: &str) {
+        let tokens: Vec<&str> = cmd.split_whitespace().collect();
+        let mut i = 0;
+        while i < tokens.len() {
+            match tokens[i] {
+                "-m" => {
+                    i += 1;
+                }
+                "--host" => {
+                    if let Some(v) = tokens.get(i + 1) {
+                        self.config.host = v.to_string();
+                        i += 1;
+                    }
+                }
+                "--port" => {
+                    if let Some(v) = tokens.get(i + 1) {
+                        self.port_text = v.to_string();
+                        i += 1;
+                    }
+                }
+                "-c" => {
+                    if let Some(v) = tokens.get(i + 1) {
+                        self.ctx_size_text = v.to_string();
+                        i += 1;
+                    }
+                }
+                "--n-gpu-layers" => {
+                    if let Some(v) = tokens.get(i + 1) {
+                        self.gpu_layers_text = v.to_string();
+                        i += 1;
+                    }
+                }
+                "--spec-type" => {
+                    self.config.mtp_enabled = tokens.get(i + 1).is_some_and(|&v| v == "draft-mtp");
+                    i += 1;
+                }
+                "--spec-draft-n-max" => {
+                    if let Some(v) = tokens.get(i + 1) {
+                        self.spec_nmax_text = v.to_string();
+                        i += 1;
+                    }
+                }
+                "--flash-attn" | "-fa" => {
+                    if let Some(v) = tokens.get(i + 1) {
+                        if !v.starts_with('-') {
+                            self.config.flash_attn = v.to_string();
+                            i += 1;
+                        }
+                    }
+                }
+                x if x.starts_with("--flash-attn=") => {
+                    if let Some(v) = x.split('=').nth(1) {
+                        self.config.flash_attn = v.to_string();
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
+    fn extract_extra_args(&self) -> String {
+        let known_flags = ["-m", "--host", "--port", "-c", "--n-gpu-layers",
+                           "--spec-type", "--spec-draft-n-max", "--flash-attn"];
+        let tokens: Vec<&str> = self.command_text.split_whitespace().collect();
+        let mut extra = Vec::new();
+        let mut i = 0;
+        while i < tokens.len() {
+            if known_flags.contains(&tokens[i]) || tokens[i].starts_with("--flash-attn=") {
+                // --flash-attn optionally takes on/off/auto as separate token
+                if tokens[i] == "--flash-attn" {
+                    if let Some(next) = tokens.get(i + 1) {
+                        if *next == "on" || *next == "off" || *next == "auto" {
+                            i += 1;
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+            } else {
+                if i > 0 {
+                    extra.push(tokens[i]);
+                }
+            }
+            i += 1;
+        }
+        extra.join(" ")
+    }
 }
 
 impl eframe::App for App {
@@ -117,6 +244,21 @@ impl eframe::App for App {
         }
         if let Ok(v) = self.ctx_size_text.parse::<u32>() {
             self.config.ctx_size = v;
+        }
+        if let Ok(v) = self.spec_nmax_text.parse::<u32>() {
+            self.config.spec_draft_n_max = v;
+        }
+
+        let cmd_id = egui::Id::new("cmd_text_area");
+        let cmd_has_focus = ctx.memory(|m| m.focused() == Some(cmd_id));
+        if !cmd_has_focus {
+            let generated = self.generate_command();
+            if self.command_text != generated {
+                self.command_text = generated;
+            }
+        } else {
+            let cmd = self.command_text.clone();
+            self.parse_command(&cmd);
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -214,19 +356,46 @@ impl eframe::App for App {
                             ui.end_row();
 
                             ui.label(RichText::new(self.l10n.port()).color(TEXT_DIM));
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.port_text)
-                                    .desired_width(110.0)
-                                    .font(egui::TextStyle::Monospace),
-                            );
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.port_text)
+                                        .desired_width(110.0)
+                                        .font(egui::TextStyle::Monospace),
+                                );
+                                ui.add_space(24.0);
+                                ui.checkbox(&mut self.config.mtp_enabled,
+                                    RichText::new(self.l10n.mtp()).color(TEXT_DIM).size(13.0));
+                                ui.add_space(4.0);
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.spec_nmax_text)
+                                        .desired_width(40.0)
+                                        .font(egui::TextStyle::Monospace),
+                                );
+                            });
                             ui.end_row();
 
                             ui.label(RichText::new(self.l10n.gpu_layers()).color(TEXT_DIM));
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.gpu_layers_text)
-                                    .desired_width(110.0)
-                                    .font(egui::TextStyle::Monospace),
-                            );
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.gpu_layers_text)
+                                        .desired_width(110.0)
+                                        .font(egui::TextStyle::Monospace),
+                                );
+                                ui.add_space(46.0);
+                                ui.label(RichText::new(self.l10n.flash_attn()).color(TEXT_DIM).size(13.0));
+                                egui::ComboBox::from_id_salt("flash_attn")
+                                    .selected_text(RichText::new(&self.config.flash_attn).color(TEXT))
+                                    .width(60.0)
+                                    .show_ui(ui, |ui| {
+                                        for v in &["auto", "on", "off"] {
+                                            ui.selectable_value(
+                                                &mut self.config.flash_attn,
+                                                v.to_string(),
+                                                RichText::new(*v).color(TEXT),
+                                            );
+                                        }
+                                    });
+                            });
                             ui.end_row();
 
                             ui.label(RichText::new(self.l10n.ctx_size()).color(TEXT_DIM));
@@ -237,6 +406,22 @@ impl eframe::App for App {
                             );
                             ui.end_row();
                         });
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(self.l10n.cmd_args())
+                            .size(13.0)
+                            .color(ACCENT),
+                    );
+                    ui.add_sized(
+                        Vec2::new(ui.available_width(), 100.0),
+                        egui::TextEdit::multiline(&mut self.command_text)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_rows(4)
+                            .id(cmd_id),
+                    );
 
                     ui.add_space(8.0);
                     ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
@@ -277,6 +462,7 @@ impl eframe::App for App {
                             self.status = self.l10n.starting().to_string();
                             let (tx, rx) = mpsc::channel();
                             self.event_receiver = Some(rx);
+                            let extra_args = self.extract_extra_args();
                             let cfg = self.config.clone();
                             let lang = self.l10n.lang();
                             server::start_server_async(
@@ -287,6 +473,10 @@ impl eframe::App for App {
                                 cfg.port,
                                 cfg.n_gpu_layers,
                                 cfg.ctx_size,
+                                cfg.mtp_enabled,
+                                cfg.flash_attn,
+                                cfg.spec_draft_n_max,
+                                extra_args,
                                 lang,
                                 tx,
                             );

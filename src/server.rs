@@ -36,6 +36,10 @@ pub fn start_server_async(
     port: u16,
     n_gpu_layers: u32,
     ctx_size: u32,
+    mtp_enabled: bool,
+    flash_attn: String,
+    spec_draft_n_max: u32,
+    extra_args: String,
     lang: Lang,
     log_sender: mpsc::Sender<ServerEvent>,
 ) {
@@ -73,8 +77,20 @@ pub fn start_server_async(
             .arg("-c")
             .arg(ctx_size.to_string())
             .arg("--n-gpu-layers")
-            .arg(n_gpu_layers.to_string())
-            .stdout(Stdio::piped())
+            .arg(n_gpu_layers.to_string());
+        if mtp_enabled {
+            cmd.arg("--spec-type").arg("draft-mtp")
+                .arg("--spec-draft-n-max").arg(spec_draft_n_max.to_string());
+        }
+        if flash_attn != "auto" {
+            cmd.arg(format!("--flash-attn={}", flash_attn));
+        }
+        if !extra_args.is_empty() {
+            for arg in extra_args.split_whitespace() {
+                cmd.arg(arg);
+            }
+        }
+        cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
         kill_process_on_port(port);
