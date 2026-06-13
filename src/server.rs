@@ -84,7 +84,7 @@ pub fn start_server_async(
                 .arg("--spec-draft-n-max").arg(spec_draft_n_max.to_string());
         }
         if flash_attn != "auto" {
-            cmd.arg(format!("--flash-attn={}", flash_attn));
+            cmd.arg("--flash-attn").arg(&flash_attn);
         }
         if !mmproj.is_empty() {
             let mmproj_path = resolve_model_path(&model_dir, &mmproj, lang)

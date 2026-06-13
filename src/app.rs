@@ -16,6 +16,7 @@ const TEXT_DIM: Color32 = Color32::from_rgb(140, 140, 160);
 const GREEN: Color32 = Color32::from_rgb(0, 200, 83);
 const GREEN_DIM: Color32 = Color32::from_rgb(0, 150, 60);
 const GREEN_BG: Color32 = Color32::from_rgb(25, 65, 40);
+const ORANGE_BG: Color32 = Color32::from_rgb(180, 90, 20);
 const RED: Color32 = Color32::from_rgb(239, 68, 68);
 
 pub struct App {
@@ -34,6 +35,7 @@ pub struct App {
     command_text: String,
     profiles: HashMap<String, Config>,
     current_profile: String,
+    loaded_profile: String,
     show_save_dialog: bool,
     save_dialog_name: String,
     show_load_dialog: bool,
@@ -81,7 +83,8 @@ impl Default for App {
             spec_nmax_text,
             command_text,
             profiles,
-            current_profile: last_profile,
+            current_profile: last_profile.clone(),
+            loaded_profile: last_profile,
             show_save_dialog: false,
             save_dialog_name: String::new(),
             show_load_dialog: false,
@@ -179,7 +182,8 @@ impl App {
             parts.push(self.spec_nmax_text.clone());
         }
         if self.config.flash_attn != "auto" {
-            parts.push(format!("--flash-attn={}", self.config.flash_attn));
+            parts.push("--flash-attn".to_string());
+            parts.push(self.config.flash_attn.clone());
         }
         if !self.config.mmproj.is_empty() {
             let mmproj_name = if self.config.mmproj.ends_with(".gguf") {
@@ -731,7 +735,13 @@ impl eframe::App for App {
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             for name in &profile_names {
-                                let bg = if *name == self.config.model_name { GREEN_BG } else { SURFACE };
+                                let bg = if *name == self.loaded_profile {
+                                    ORANGE_BG
+                                } else if *name == self.config.model_name {
+                                    GREEN_BG
+                                } else {
+                                    SURFACE
+                                };
                                 ui.horizontal(|ui| {
                                     if ui.add_sized(
                                         Vec2::new(ui.available_width() - 36.0, 28.0),
@@ -777,11 +787,15 @@ impl eframe::App for App {
                 if self.current_profile == name {
                     self.current_profile = String::new();
                 }
+                if self.loaded_profile == name {
+                    self.loaded_profile = String::new();
+                }
             }
             if close {
                 if let Some(name) = load_profile {
                     if let Some(cfg) = self.profiles.get(&name).cloned() {
                         self.apply_config(&name, &cfg);
+                        self.loaded_profile = name;
                     }
                 }
                 self.show_load_dialog = false;
