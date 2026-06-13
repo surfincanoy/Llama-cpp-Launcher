@@ -1,1 +1,6 @@
 /target
+llamacpp_config.json
+*.exe
+/.cargo
+build.sh
+key.txt
