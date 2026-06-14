@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::mpsc;
 
@@ -17,7 +18,7 @@ const GREEN: Color32 = Color32::from_rgb(0, 200, 83);
 const GREEN_DIM: Color32 = Color32::from_rgb(0, 150, 60);
 const GREEN_BG: Color32 = Color32::from_rgb(25, 65, 40);
 const ORANGE_BG: Color32 = Color32::from_rgb(180, 90, 20);
-const RED: Color32 = Color32::from_rgb(239, 68, 68);
+
 
 pub struct App {
     config: Config,
@@ -37,6 +38,7 @@ pub struct App {
     profiles: HashMap<String, Config>,
     current_profile: String,
     loaded_profile: String,
+    prev_model_name: String,
     show_save_dialog: bool,
     save_dialog_name: String,
     show_load_dialog: bool,
@@ -70,7 +72,8 @@ impl Default for App {
         let ctx_size_text = config.ctx_size.to_string();
         let spec_nmax_text = config.spec_draft_n_max.to_string();
         let models_max_text = config.models_max.to_string();
-        let app = Self {
+        let model_name = config.model_name.clone();
+        let mut app = Self {
             config,
             models,
             mmproj_models,
@@ -88,10 +91,17 @@ impl Default for App {
             profiles,
             current_profile: last_profile.clone(),
             loaded_profile: last_profile,
+            prev_model_name: model_name.clone(),
             show_save_dialog: false,
             save_dialog_name: String::new(),
             show_load_dialog: false,
         };
+        if !model_name.is_empty() {
+            if let Some(cfg) = app.profiles.get(&model_name).cloned() {
+                app.apply_config(&model_name, &cfg);
+                app.loaded_profile = model_name;
+            }
+        }
         app
     }
 }
@@ -124,6 +134,7 @@ impl App {
         self.models_max_text = cfg.models_max.to_string();
         self.command_text = cfg.command_text.clone();
         self.current_profile = profile_name.to_string();
+        self.prev_model_name = self.config.model_name.clone();
         if self.config.model_dir != old_dir && !self.config.model_dir.is_empty() {
             self.models = config::list_models(&self.config.model_dir);
             self.mmproj_models = config::list_mmproj_models(&self.config.model_dir);
@@ -145,7 +156,7 @@ impl App {
             match event {
                 ServerEvent::Log(msg) => self.add_log(&msg),
                 ServerEvent::Started(process) => {
-                    self.status = self.l10n.running_with_pid(process.pid());
+                    self.status = self.l10n.running();
                     self.server_process = Some(process);
                     self.event_receiver = None;
                     let url = if self.config.route_mode {
@@ -165,53 +176,58 @@ impl App {
     }
     fn generate_command(&self) -> String {
         if self.config.route_mode {
-                    return format!(
-                        "{} --models-preset {}",
-                        self.config.executable,
-                        config::config_ini_path_str()
-                    );
+            return format!(
+                "{} --models-preset {}",
+                self.config.executable,
+                config::config_ini_path_str()
+            );
         }
-        let mut parts = Vec::new();
-        parts.push(self.config.executable.clone());
+        let mut parts: Vec<Cow<'_, str>> = Vec::new();
+        parts.push(Cow::Borrowed(&self.config.executable));
         if !self.config.model_name.is_empty() {
             let model_name = if self.config.model_name.ends_with(".gguf") {
-                self.config.model_name.clone()
+                Cow::Borrowed(&self.config.model_name)
             } else {
-                format!("{}.gguf", self.config.model_name)
+                Cow::Owned(format!("{}.gguf", self.config.model_name))
             };
             let model_path = format!("{}/{}", self.config.model_dir.trim_end_matches('/'), model_name);
-            parts.push("-m".to_string());
-            parts.push(model_path);
+            parts.push(Cow::Borrowed("-m"));
+            parts.push(Cow::Owned(model_path));
         }
-        parts.push("--host".to_string());
-        parts.push(self.config.host.clone());
-        parts.push("--port".to_string());
-        parts.push(self.port_text.clone());
-        parts.push("-c".to_string());
-        parts.push(self.ctx_size_text.clone());
-        parts.push("--n-gpu-layers".to_string());
-        parts.push(self.gpu_layers_text.clone());
+        parts.push(Cow::Borrowed("--host"));
+        parts.push(Cow::Borrowed(&self.config.host));
+        parts.push(Cow::Borrowed("--port"));
+        parts.push(Cow::Borrowed(&self.port_text));
+        parts.push(Cow::Borrowed("-c"));
+        parts.push(Cow::Borrowed(&self.ctx_size_text));
+        parts.push(Cow::Borrowed("--n-gpu-layers"));
+        parts.push(Cow::Borrowed(&self.gpu_layers_text));
         if self.config.mtp_enabled {
-            parts.push("--spec-type".to_string());
-            parts.push("draft-mtp".to_string());
-            parts.push("--spec-draft-n-max".to_string());
-            parts.push(self.spec_nmax_text.clone());
+            parts.push(Cow::Borrowed("--spec-type"));
+            parts.push(Cow::Borrowed("draft-mtp"));
+            parts.push(Cow::Borrowed("--spec-draft-n-max"));
+            parts.push(Cow::Borrowed(&self.spec_nmax_text));
         }
         if self.config.flash_attn != "auto" {
-            parts.push("--flash-attn".to_string());
-            parts.push(self.config.flash_attn.clone());
+            parts.push(Cow::Borrowed("--flash-attn"));
+            parts.push(Cow::Borrowed(&self.config.flash_attn));
         }
         if !self.config.mmproj.is_empty() {
             let mmproj_name = if self.config.mmproj.ends_with(".gguf") {
-                self.config.mmproj.clone()
+                Cow::Borrowed(&self.config.mmproj)
             } else {
-                format!("{}.gguf", self.config.mmproj)
+                Cow::Owned(format!("{}.gguf", self.config.mmproj))
             };
             let mmproj_path = format!("{}/{}", self.config.model_dir.trim_end_matches('/'), mmproj_name);
-            parts.push("--mmproj".to_string());
-            parts.push(mmproj_path);
+            parts.push(Cow::Borrowed("--mmproj"));
+            parts.push(Cow::Owned(mmproj_path));
         }
-        parts.join(" ")
+        let mut out = String::new();
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 { out.push(' '); }
+            out.push_str(part);
+        }
+        out
     }
 
     fn parse_command(&mut self, cmd: &str) {
@@ -414,6 +430,14 @@ impl eframe::App for App {
                                         );
                                     }
                                 });
+                            if self.config.model_name != self.prev_model_name {
+                                let new_name = self.config.model_name.clone();
+                                self.prev_model_name = new_name.clone();
+                                if let Some(cfg) = self.profiles.get(&new_name).cloned() {
+                                    self.apply_config(&new_name, &cfg);
+                                    self.loaded_profile = new_name;
+                                }
+                            }
                             ui.end_row();
 
                             ui.label(RichText::new(self.l10n.vision_model()).color(TEXT_DIM));
@@ -556,7 +580,7 @@ impl eframe::App for App {
                         let (dot_color, label_color) = if self.is_running() {
                             (GREEN, TEXT)
                         } else if self.status == self.l10n.start_failed() {
-                            (RED, TEXT)
+                            (DANGER, TEXT)
                         } else {
                             (TEXT_DIM, TEXT_DIM)
                         };
@@ -747,13 +771,13 @@ impl eframe::App for App {
                     ui.add_space(8.0);
                     ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                         ui.horizontal(|ui| {
-                            let name = self.save_dialog_name.clone();
                             if ui.add(
                                 egui::Button::new(RichText::new(self.l10n.confirm()).color(TEXT))
                                     .fill(SURFACE_LIGHT)
                                     .corner_radius(CornerRadius::same(4))
                                     .min_size(Vec2::new(80.0, 26.0)),
-                            ).clicked() && !name.is_empty() {
+                            ).clicked() && !self.save_dialog_name.is_empty() {
+                                let name = self.save_dialog_name.clone();
                                 config::save_profile(&name, &self.config, &name);
                                 let extra = self.extract_extra_args();
                                 config::update_config_ini_profile(&name, &self.config, &extra);
@@ -865,24 +889,24 @@ impl eframe::App for App {
 }
 
 fn setup_visuals(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
-    let v = &mut style.visuals;
-    v.override_text_color = Some(TEXT);
-    v.panel_fill = BG;
-    v.window_fill = SURFACE;
-    v.extreme_bg_color = BG;
-    v.faint_bg_color = SURFACE;
-    v.widgets.noninteractive.bg_fill = SURFACE;
-    v.widgets.noninteractive.weak_bg_fill = SURFACE;
-    v.widgets.inactive.bg_fill = BG;
-    v.widgets.inactive.weak_bg_fill = BG;
-    v.widgets.hovered.bg_fill = SURFACE;
-    v.widgets.hovered.weak_bg_fill = SURFACE;
-    v.widgets.active.bg_fill = SURFACE_LIGHT;
-    v.widgets.active.weak_bg_fill = SURFACE_LIGHT;
-    style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-    style.spacing.button_padding = Vec2::new(8.0, 4.0);
-    ctx.set_style(style);
+    ctx.style_mut(|style| {
+        let v = &mut style.visuals;
+        v.override_text_color = Some(TEXT);
+        v.panel_fill = BG;
+        v.window_fill = SURFACE;
+        v.extreme_bg_color = BG;
+        v.faint_bg_color = SURFACE;
+        v.widgets.noninteractive.bg_fill = SURFACE;
+        v.widgets.noninteractive.weak_bg_fill = SURFACE;
+        v.widgets.inactive.bg_fill = BG;
+        v.widgets.inactive.weak_bg_fill = BG;
+        v.widgets.hovered.bg_fill = SURFACE;
+        v.widgets.hovered.weak_bg_fill = SURFACE;
+        v.widgets.active.bg_fill = SURFACE_LIGHT;
+        v.widgets.active.weak_bg_fill = SURFACE_LIGHT;
+        style.spacing.item_spacing = Vec2::new(8.0, 6.0);
+        style.spacing.button_padding = Vec2::new(8.0, 4.0);
+    });
 }
 
 fn setup_chinese_fonts(ctx: &egui::Context) {
@@ -928,7 +952,7 @@ fn setup_chinese_fonts(ctx: &egui::Context) {
     }
 
     if !loaded {
-        eprintln!("警告: 未找到中文字体，中文可能显示为方框");
+        eprintln!("Warning: no CJK font found, Chinese text may display as boxes");
     }
 
     ctx.set_fonts(fonts);

@@ -63,7 +63,7 @@ impl L10n {
     t_str!(exec_hint, "选择 llama-server ...", "Select llama-server ...");
     t_str!(dir_hint, "选择模型文件夹 ...", "Select model folder ...");
 
-    pub fn running_with_pid(&self, _pid: u32) -> String {
+    pub fn running(&self) -> String {
         match self.lang {
             Lang::Zh => "运行中".to_string(),
             Lang::En => "Running".to_string(),

@@ -47,11 +47,20 @@ pub type Profiles = HashMap<String, Config>;
 
 const META_KEY: &str = "__meta__";
 
-fn config_path() -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
-    exe.parent()
+fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .parent()
         .unwrap_or(&PathBuf::from("."))
-        .join("llamacpp_config.json")
+        .to_path_buf()
+}
+
+fn config_file(name: &str) -> PathBuf {
+    exe_dir().join(name)
+}
+
+fn config_path() -> PathBuf {
+    config_file("llamacpp_config.json")
 }
 
 pub fn load_profiles() -> (Profiles, String) {
@@ -126,10 +135,7 @@ pub fn delete_profile(name: &str) -> bool {
 }
 
 fn config_ini_path() -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
-    exe.parent()
-        .unwrap_or(&PathBuf::from("."))
-        .join("config.ini")
+    config_file("config.ini")
 }
 
 pub fn config_ini_path_str() -> String {
@@ -266,17 +272,7 @@ pub fn update_config_ini_profile(profile_name: &str, config: &Config, extra_args
         Vec::new()
     };
 
-    let new_kvs = {
-        let mut kvs = HashMap::new();
-        for line in new_section.lines() {
-            if let Some(eq_pos) = line.find('=') {
-                let key = line[..eq_pos].trim().to_string();
-                let val = line[eq_pos+1..].trim().to_string();
-                kvs.insert(key, val);
-            }
-        }
-        kvs
-    };
+    let new_kvs = section_str_to_kvs(&new_section);
 
     for (name, kvs) in &all_sections {
         if name == profile_name && *kvs == new_kvs {
@@ -297,6 +293,18 @@ pub fn update_config_ini_profile(profile_name: &str, config: &Config, extra_args
     }
 
     fs::write(&path, sections_to_ini(&all_sections, false)).is_ok()
+}
+
+fn section_str_to_kvs(s: &str) -> HashMap<String, String> {
+    let mut kvs = HashMap::new();
+    for line in s.lines() {
+        if let Some(eq_pos) = line.find('=') {
+            let key = line[..eq_pos].trim().to_string();
+            let val = line[eq_pos+1..].trim().to_string();
+            kvs.insert(key, val);
+        }
+    }
+    kvs
 }
 
 pub fn add_config_ini_section_if_missing(profile_name: &str, config: &Config, extra_args: &str) -> bool {
@@ -324,17 +332,7 @@ pub fn add_config_ini_section_if_missing(profile_name: &str, config: &Config, ex
     } else {
         Vec::new()
     };
-    let new_kvs = {
-        let mut kvs = HashMap::new();
-        for line in new_section.lines() {
-            if let Some(eq_pos) = line.find('=') {
-                let key = line[..eq_pos].trim().to_string();
-                let val = line[eq_pos+1..].trim().to_string();
-                kvs.insert(key, val);
-            }
-        }
-        kvs
-    };
+    let new_kvs = section_str_to_kvs(&new_section);
     all_sections.push((profile_name.to_string(), new_kvs));
     fs::write(&path, sections_to_ini(&all_sections, false)).is_ok()
 }
@@ -398,13 +396,15 @@ pub fn sync_ini_model_sections(
     }
 }
 
-pub fn list_models(model_dir: &str) -> Vec<String> {
+fn list_gguf_models<F>(model_dir: &str, filter: F) -> Vec<String>
+where F: Fn(&str) -> bool,
+{
     let mut models = Vec::new();
     if let Ok(entries) = fs::read_dir(model_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.ends_with(".gguf") && !name.starts_with("mmproj") {
+            if name.ends_with(".gguf") && filter(&name) {
                 models.push(name.trim_end_matches(".gguf").to_string());
             }
         }
@@ -413,24 +413,17 @@ pub fn list_models(model_dir: &str) -> Vec<String> {
     models
 }
 
+pub fn list_models(model_dir: &str) -> Vec<String> {
+    list_gguf_models(model_dir, |n| !n.starts_with("mmproj"))
+}
+
 pub fn list_mmproj_models(model_dir: &str) -> Vec<String> {
-    let mut models = Vec::new();
-    if let Ok(entries) = fs::read_dir(model_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.ends_with(".gguf") && name.starts_with("mmproj") {
-                models.push(name.trim_end_matches(".gguf").to_string());
-            }
-        }
-    }
-    models.sort();
-    models
+    list_gguf_models(model_dir, |n| n.starts_with("mmproj"))
 }
 
 pub fn extract_extra_args(command_text: &str) -> String {
     let known_flags = ["-m", "--host", "--port", "-c", "--n-gpu-layers",
-                       "--spec-type", "--spec-draft-n-max", "--flash-attn", "--mmproj",
+                       "--spec-type", "--spec-draft-n-max", "--flash-attn", "-fa", "--mmproj",
                        "--models-preset", "--models-max"];
     let tokens: Vec<&str> = command_text.split_whitespace().collect();
     let mut extra = Vec::new();

@@ -11,10 +11,6 @@ pub struct ServerProcess {
 }
 
 impl ServerProcess {
-    pub fn pid(&self) -> u32 {
-        self.child.id()
-    }
-
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -190,13 +186,13 @@ pub fn start_server_async(
 
             if agent.get(&url).call().map(|r| r.status() == 200).unwrap_or(false) {
                 // Let any pending exit complete before trusting the health check
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(200));
                 match child.try_wait() {
                     Ok(None) => {
                         ready = true;
                         // Collect remaining startup logs
                         for _ in 0..5 {
-                            std::thread::sleep(Duration::from_millis(50));
+                            std::thread::sleep(Duration::from_millis(200));
                             while let Ok(line) = log_rx.try_recv() {
                                 send(&line);
                             }
@@ -207,7 +203,7 @@ pub fn start_server_async(
                 }
             }
 
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(200));
         }
 
         // Drain any remaining log lines
@@ -343,7 +339,10 @@ impl CommandExt for Child {
     fn terminate(&mut self) -> std::io::Result<()> {
         #[cfg(unix)]
         unsafe {
-            libc::kill(self.id() as i32, libc::SIGTERM);
+            let ret = libc::kill(self.id() as i32, libc::SIGTERM);
+            if ret != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
         }
         #[cfg(windows)]
         {
