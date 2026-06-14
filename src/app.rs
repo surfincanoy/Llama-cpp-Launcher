@@ -32,6 +32,7 @@ pub struct App {
     gpu_layers_text: String,
     ctx_size_text: String,
     spec_nmax_text: String,
+    models_max_text: String,
     command_text: String,
     profiles: HashMap<String, Config>,
     current_profile: String,
@@ -68,7 +69,8 @@ impl Default for App {
         let gpu_layers_text = config.n_gpu_layers.to_string();
         let ctx_size_text = config.ctx_size.to_string();
         let spec_nmax_text = config.spec_draft_n_max.to_string();
-        Self {
+        let models_max_text = config.models_max.to_string();
+        let app = Self {
             config,
             models,
             mmproj_models,
@@ -81,6 +83,7 @@ impl Default for App {
             gpu_layers_text,
             ctx_size_text,
             spec_nmax_text,
+            models_max_text,
             command_text,
             profiles,
             current_profile: last_profile.clone(),
@@ -88,7 +91,9 @@ impl Default for App {
             show_save_dialog: false,
             save_dialog_name: String::new(),
             show_load_dialog: false,
-        }
+        };
+        app.sync_profile_sections();
+        app
     }
 }
 
@@ -110,6 +115,15 @@ impl App {
         self.server_process.is_some()
     }
 
+    fn sync_profile_sections(&self) {
+        for (name, cfg) in &self.profiles {
+            if self.models.contains(name) {
+                let extra = config::extract_extra_args(&cfg.command_text);
+                config::add_config_ini_section_if_missing(name, cfg, &extra);
+            }
+        }
+    }
+
     fn apply_config(&mut self, profile_name: &str, cfg: &Config) {
         let old_dir = std::mem::take(&mut self.config.model_dir);
         self.config = cfg.clone();
@@ -117,11 +131,13 @@ impl App {
         self.gpu_layers_text = cfg.n_gpu_layers.to_string();
         self.ctx_size_text = cfg.ctx_size.to_string();
         self.spec_nmax_text = cfg.spec_draft_n_max.to_string();
+        self.models_max_text = cfg.models_max.to_string();
         self.command_text = cfg.command_text.clone();
         self.current_profile = profile_name.to_string();
         if self.config.model_dir != old_dir && !self.config.model_dir.is_empty() {
             self.models = config::list_models(&self.config.model_dir);
             self.mmproj_models = config::list_mmproj_models(&self.config.model_dir);
+            config::auto_generate_config_ini(&self.config);
         }
     }
 
@@ -143,7 +159,11 @@ impl App {
                     self.status = self.l10n.running_with_pid(process.pid());
                     self.server_process = Some(process);
                     self.event_receiver = None;
-                    let url = format!("http://{}:{}", self.config.host, self.config.port);
+                    let url = if self.config.route_mode {
+                        "http://127.0.0.1:8080".to_string()
+                    } else {
+                        format!("http://{}:{}", self.config.host, self.config.port)
+                    };
                     let _ = webbrowser::open(&url);
                 }
                 ServerEvent::Failed(msg) => {
@@ -155,6 +175,13 @@ impl App {
         }
     }
     fn generate_command(&self) -> String {
+        if self.config.route_mode {
+                    return format!(
+                        "{} --models-preset {}",
+                        self.config.executable,
+                        config::config_ini_path_str()
+                    );
+        }
         let mut parts = Vec::new();
         parts.push(self.config.executable.clone());
         if !self.config.model_name.is_empty() {
@@ -259,6 +286,16 @@ impl App {
                         i += 1;
                     }
                 }
+                "--models-preset" => {
+                    self.config.route_mode = true;
+                    i += 1;
+                }
+                "--models-max" => {
+                    if let Some(v) = tokens.get(i + 1) {
+                        self.models_max_text = v.to_string();
+                        i += 1;
+                    }
+                }
                 _ => {}
             }
             i += 1;
@@ -266,31 +303,7 @@ impl App {
     }
 
     fn extract_extra_args(&self) -> String {
-        let known_flags = ["-m", "--host", "--port", "-c", "--n-gpu-layers",
-                           "--spec-type", "--spec-draft-n-max", "--flash-attn", "--mmproj"];
-        let tokens: Vec<&str> = self.command_text.split_whitespace().collect();
-        let mut extra = Vec::new();
-        let mut i = 0;
-        while i < tokens.len() {
-            if known_flags.contains(&tokens[i]) || tokens[i].starts_with("--flash-attn=") {
-                // --flash-attn optionally takes on/off/auto as separate token
-                if tokens[i] == "--flash-attn" {
-                    if let Some(next) = tokens.get(i + 1) {
-                        if *next == "on" || *next == "off" || *next == "auto" {
-                            i += 1;
-                        }
-                    }
-                } else {
-                    i += 1;
-                }
-            } else {
-                if i > 0 {
-                    extra.push(tokens[i]);
-                }
-            }
-            i += 1;
-        }
-        extra.join(" ")
+        config::extract_extra_args(&self.command_text)
     }
 }
 
@@ -310,6 +323,9 @@ impl eframe::App for App {
         }
         if let Ok(v) = self.spec_nmax_text.parse::<u32>() {
             self.config.spec_draft_n_max = v;
+        }
+        if let Ok(v) = self.models_max_text.parse::<u32>() {
+            self.config.models_max = v;
         }
 
         let cmd_id = egui::Id::new("cmd_text_area");
@@ -434,66 +450,88 @@ impl eframe::App for App {
                                     }
                                 });
                             ui.end_row();
-
-                            ui.label(RichText::new(self.l10n.host()).color(TEXT_DIM));
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.config.host)
-                                    .desired_width(160.0)
-                                    .font(egui::TextStyle::Monospace),
-                            );
-                            ui.end_row();
-
-                            ui.label(RichText::new(self.l10n.port()).color(TEXT_DIM));
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.port_text)
-                                        .desired_width(110.0)
-                                        .font(egui::TextStyle::Monospace),
-                                );
-                                ui.add_space(24.0);
-                                ui.checkbox(&mut self.config.mtp_enabled,
-                                    RichText::new(self.l10n.mtp()).color(TEXT_DIM).size(13.0));
-                                ui.add_space(4.0);
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.spec_nmax_text)
-                                        .desired_width(40.0)
-                                        .font(egui::TextStyle::Monospace),
-                                );
-                            });
-                            ui.end_row();
-
-                            ui.label(RichText::new(self.l10n.gpu_layers()).color(TEXT_DIM));
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.gpu_layers_text)
-                                        .desired_width(110.0)
-                                        .font(egui::TextStyle::Monospace),
-                                );
-                                ui.add_space(46.0);
-                                ui.label(RichText::new(self.l10n.flash_attn()).color(TEXT_DIM).size(13.0));
-                                egui::ComboBox::from_id_salt("flash_attn")
-                                    .selected_text(RichText::new(&self.config.flash_attn).color(TEXT))
-                                    .width(60.0)
-                                    .show_ui(ui, |ui| {
-                                        for v in &["auto", "on", "off"] {
-                                            ui.selectable_value(
-                                                &mut self.config.flash_attn,
-                                                v.to_string(),
-                                                RichText::new(*v).color(TEXT),
-                                            );
-                                        }
-                                    });
-                            });
-                            ui.end_row();
-
-                            ui.label(RichText::new(self.l10n.ctx_size()).color(TEXT_DIM));
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.ctx_size_text)
-                                    .desired_width(110.0)
-                                    .font(egui::TextStyle::Monospace),
-                            );
-                            ui.end_row();
                         });
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            egui::Grid::new("left_grid")
+                                .num_columns(2)
+                                .spacing([12.0, 6.0])
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new(self.l10n.host()).color(TEXT_DIM));
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.config.host)
+                                            .desired_width(110.0)
+                                            .font(egui::TextStyle::Monospace),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label(RichText::new(self.l10n.port()).color(TEXT_DIM));
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.port_text)
+                                            .desired_width(110.0)
+                                            .font(egui::TextStyle::Monospace),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label(RichText::new(self.l10n.gpu_layers()).color(TEXT_DIM));
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.gpu_layers_text)
+                                            .desired_width(110.0)
+                                            .font(egui::TextStyle::Monospace),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label(RichText::new(self.l10n.ctx_size()).color(TEXT_DIM));
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.ctx_size_text)
+                                            .desired_width(110.0)
+                                            .font(egui::TextStyle::Monospace),
+                                    );
+                                    ui.end_row();
+                                });
+                        });
+                        ui.add_space(24.0);
+                        ui.vertical(|ui| {
+                            egui::Grid::new("right_grid")
+                                .num_columns(2)
+                                .spacing([12.0, 6.0])
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new(self.l10n.models_max()).color(TEXT_DIM));
+                                    ui.add_enabled(self.config.route_mode,
+                                        egui::TextEdit::singleline(&mut self.models_max_text)
+                                            .desired_width(60.0)
+                                            .font(egui::TextStyle::Monospace),
+                                    );
+                                    ui.end_row();
+
+                                    ui.checkbox(&mut self.config.mtp_enabled,
+                                        RichText::new(self.l10n.mtp()).color(TEXT_DIM).size(13.0));
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.spec_nmax_text)
+                                            .desired_width(60.0)
+                                            .font(egui::TextStyle::Monospace),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label(RichText::new(self.l10n.flash_attn()).color(TEXT_DIM).size(13.0));
+                                    egui::ComboBox::from_id_salt("flash_attn")
+                                        .selected_text(RichText::new(&self.config.flash_attn).color(TEXT))
+                                        .width(60.0)
+                                        .show_ui(ui, |ui| {
+                                            for v in &["auto", "on", "off"] {
+                                                ui.selectable_value(
+                                                    &mut self.config.flash_attn,
+                                                    v.to_string(),
+                                                    RichText::new(*v).color(TEXT),
+                                                );
+                                            }
+                                        });
+                                    ui.end_row();
+                                });
+                        });
+                    });
 
                     ui.add_space(12.0);
                     ui.separator();
@@ -505,15 +543,67 @@ impl eframe::App for App {
                     );
                     ui.add_sized(
                         Vec2::new(ui.available_width(), 100.0),
-                        egui::TextEdit::multiline(&mut self.command_text)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_rows(4)
-                            .id(cmd_id),
+                        |ui: &mut egui::Ui| {
+                            let mut display_text = if self.config.route_mode {
+                                format!("--models-preset {}", config::config_ini_path_str())
+                            } else {
+                                self.command_text.clone()
+                            };
+                            let te = egui::TextEdit::multiline(&mut display_text)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_rows(4)
+                                .id(cmd_id)
+                                .interactive(!self.config.route_mode);
+                            let resp = ui.add(te);
+                            if !self.config.route_mode && resp.changed() {
+                                self.command_text = display_text;
+                            }
+                            resp
+                        },
                     );
 
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        ui.horizontal(|ui| {
+                        let (dot_color, label_color) = if self.is_running() {
+                            (GREEN, TEXT)
+                        } else if self.status == self.l10n.start_failed() {
+                            (RED, TEXT)
+                        } else {
+                            (TEXT_DIM, TEXT_DIM)
+                        };
+                        let (rect, _) = ui.allocate_exact_size(
+                            Vec2::splat(10.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter()
+                            .circle_filled(rect.center(), 5.0, dot_color);
+                        ui.label(
+                            RichText::new(&self.status)
+                                .color(label_color)
+                                .size(13.0),
+                        );
+                        ui.add_space(16.0);
+                        let prev_w = ui.style().spacing.icon_width;
+                        let prev_iw = ui.style().spacing.icon_width_inner;
+                        ui.style_mut().spacing.icon_width = 14.0;
+                        ui.style_mut().spacing.icon_width_inner = 6.0;
+                        let resp = ui.add(egui::RadioButton::new(self.config.route_mode,
+                            RichText::new(self.l10n.route_mode()).color(TEXT_DIM).size(13.0)));
+                        ui.style_mut().spacing.icon_width = prev_w;
+                        ui.style_mut().spacing.icon_width_inner = prev_iw;
+                        if resp.clicked() {
+                            self.config.route_mode = !self.config.route_mode;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(
+                                egui::Button::new(RichText::new(self.l10n.load_config()).color(TEXT))
+                                    .fill(SURFACE_LIGHT)
+                                    .corner_radius(CornerRadius::same(6))
+                                    .min_size(Vec2::new(120.0, 30.0)),
+                            ).clicked() {
+                                self.show_load_dialog = true;
+                            }
+                            ui.add_space(8.0);
                             if ui.add(
                                 egui::Button::new(RichText::new(self.l10n.save_config()).color(TEXT))
                                     .fill(SURFACE_LIGHT)
@@ -524,36 +614,6 @@ impl eframe::App for App {
                                 self.show_save_dialog = true;
                             }
                             ui.add_space(8.0);
-                            if ui.add(
-                                egui::Button::new(RichText::new(self.l10n.load_config()).color(TEXT))
-                                    .fill(SURFACE_LIGHT)
-                                    .corner_radius(CornerRadius::same(6))
-                                    .min_size(Vec2::new(120.0, 30.0)),
-                            ).clicked() {
-                                self.show_load_dialog = true;
-                            }
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let (dot_color, label_color) = if self.is_running() {
-                                (GREEN, TEXT)
-                            } else if self.status == self.l10n.start_failed() {
-                                (RED, TEXT)
-                            } else {
-                                (TEXT_DIM, TEXT_DIM)
-                            };
-                            ui.horizontal(|ui| {
-                                let (rect, _) = ui.allocate_exact_size(
-                                    Vec2::splat(10.0),
-                                    egui::Sense::hover(),
-                                );
-                                ui.painter()
-                                    .circle_filled(rect.center(), 5.0, dot_color);
-                                ui.label(
-                                    RichText::new(&self.status)
-                                        .color(label_color)
-                                        .size(13.0),
-                                );
-                            });
                         });
                     });
                 });
@@ -571,7 +631,7 @@ impl eframe::App for App {
                 let start_enabled = !running
                     && !waiting
                     && !self.config.executable.is_empty()
-                    && !self.config.model_name.is_empty();
+                    && (self.config.route_mode || !self.config.model_name.is_empty());
                 let stop_enabled = running && self.event_receiver.is_none();
 
                 ui.add_enabled_ui(start_enabled, |ui| {
@@ -582,13 +642,16 @@ impl eframe::App for App {
                     .corner_radius(CornerRadius::same(6))
                     .min_size(Vec2::new(110.0, 28.0));
                     if ui.add(btn).clicked() {
+                        let extra_args = self.extract_extra_args();
+                        if self.config.route_mode {
+                            config::auto_generate_config_ini(&self.config);
+                        }
                         let msg = self.l10n.starting_server().to_string();
                         self.logs.clear();
                         self.add_log(&msg);
                         self.status = self.l10n.starting().to_string();
                         let (tx, rx) = mpsc::channel();
                         self.event_receiver = Some(rx);
-                        let extra_args = self.extract_extra_args();
                         let cfg = self.config.clone();
                         let lang = self.l10n.lang();
                         server::start_server_async(
@@ -603,6 +666,7 @@ impl eframe::App for App {
                             cfg.flash_attn,
                             cfg.spec_draft_n_max,
                             cfg.mmproj,
+                            cfg.route_mode,
                             extra_args,
                             lang,
                             tx,
@@ -701,6 +765,8 @@ impl eframe::App for App {
                                     .min_size(Vec2::new(80.0, 26.0)),
                             ).clicked() && !name.is_empty() {
                                 config::save_profile(&name, &self.config, &name);
+                                let extra = self.extract_extra_args();
+                                config::update_config_ini_profile(&name, &self.config, &extra);
                                 let (profiles, _) = config::load_profiles();
                                 self.profiles = profiles;
                                 self.current_profile = name;
@@ -795,6 +861,10 @@ impl eframe::App for App {
                 if let Some(name) = load_profile {
                     if let Some(cfg) = self.profiles.get(&name).cloned() {
                         self.apply_config(&name, &cfg);
+                        if self.models.contains(&name) {
+                            let extra = self.extract_extra_args();
+                            config::add_config_ini_section_if_missing(&name, &self.config, &extra);
+                        }
                         self.loaded_profile = name;
                     }
                 }

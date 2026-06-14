@@ -4,6 +4,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::i18n::Lang;
+use crate::config;
 
 pub struct ServerProcess {
     child: Child,
@@ -40,6 +41,7 @@ pub fn start_server_async(
     flash_attn: String,
     spec_draft_n_max: u32,
     mmproj: String,
+    route_mode: bool,
     extra_args: String,
     lang: Lang,
     log_sender: mpsc::Sender<ServerEvent>,
@@ -47,15 +49,6 @@ pub fn start_server_async(
     std::thread::spawn(move || {
         let send = |msg: &str| {
             let _ = log_sender.send(ServerEvent::Log(msg.to_string()));
-        };
-
-        let model_path = match resolve_model_path(&model_dir, &model_name, lang) {
-            Ok(p) => p,
-            Err(e) => {
-                send(&e);
-                let _ = log_sender.send(ServerEvent::Failed(e));
-                return;
-            }
         };
 
         if !std::path::Path::new(&executable).exists() {
@@ -68,29 +61,49 @@ pub fn start_server_async(
             return;
         }
 
+        kill_process_on_port(if route_mode { 8080 } else { port });
+
         let mut cmd = Command::new(&executable);
-        cmd.arg("-m")
-            .arg(&model_path)
-            .arg("--host")
-            .arg(&host)
-            .arg("--port")
-            .arg(port.to_string())
-            .arg("-c")
-            .arg(ctx_size.to_string())
-            .arg("--n-gpu-layers")
-            .arg(n_gpu_layers.to_string());
-        if mtp_enabled {
-            cmd.arg("--spec-type").arg("draft-mtp")
-                .arg("--spec-draft-n-max").arg(spec_draft_n_max.to_string());
+
+        if route_mode {
+            let ini_path = config::config_ini_path_str();
+            cmd.arg("--models-preset").arg(&ini_path);
+            let msg = format!("Route mode: --models-preset {}", ini_path);
+            send(&msg);
+        } else {
+            let model_path = match resolve_model_path(&model_dir, &model_name, lang) {
+                Ok(p) => p,
+                Err(e) => {
+                    send(&e);
+                    let _ = log_sender.send(ServerEvent::Failed(e));
+                    return;
+                }
+            };
+
+            cmd.arg("-m")
+                .arg(&model_path)
+                .arg("--host")
+                .arg(&host)
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("-c")
+                .arg(ctx_size.to_string())
+                .arg("--n-gpu-layers")
+                .arg(n_gpu_layers.to_string());
+            if mtp_enabled {
+                cmd.arg("--spec-type").arg("draft-mtp")
+                    .arg("--spec-draft-n-max").arg(spec_draft_n_max.to_string());
+            }
+            if flash_attn != "auto" {
+                cmd.arg("--flash-attn").arg(&flash_attn);
+            }
+            if !mmproj.is_empty() {
+                let mmproj_path = resolve_model_path(&model_dir, &mmproj, lang)
+                    .unwrap_or_else(|_| mmproj.clone());
+                cmd.arg("--mmproj").arg(&mmproj_path);
+            }
         }
-        if flash_attn != "auto" {
-            cmd.arg("--flash-attn").arg(&flash_attn);
-        }
-        if !mmproj.is_empty() {
-            let mmproj_path = resolve_model_path(&model_dir, &mmproj, lang)
-                .unwrap_or_else(|_| mmproj.clone());
-            cmd.arg("--mmproj").arg(&mmproj_path);
-        }
+
         if !extra_args.is_empty() {
             for arg in extra_args.split_whitespace() {
                 cmd.arg(arg);
@@ -99,7 +112,13 @@ pub fn start_server_async(
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        kill_process_on_port(port);
+        let (check_host, check_port) = if route_mode {
+            ("127.0.0.1".to_string(), 8080u16)
+        } else {
+            (host.clone(), port)
+        };
+
+        kill_process_on_port(check_port);
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -141,7 +160,7 @@ pub fn start_server_async(
             });
         }
 
-        let url = format!("http://{}:{}/v1/models", host, port);
+        let url = format!("http://{}:{}/v1/models", check_host, check_port);
         let start = Instant::now();
         let timeout = Duration::from_secs(120);
 
@@ -171,7 +190,7 @@ pub fn start_server_async(
 
             if agent.get(&url).call().map(|r| r.status() == 200).unwrap_or(false) {
                 // Let any pending exit complete before trusting the health check
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(Duration::from_millis(50));
                 match child.try_wait() {
                     Ok(None) => {
                         ready = true;
@@ -188,7 +207,7 @@ pub fn start_server_async(
                 }
             }
 
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(50));
         }
 
         // Drain any remaining log lines
@@ -198,8 +217,8 @@ pub fn start_server_async(
 
         if ready {
             let ready_msg = match lang {
-                Lang::Zh => format!("llama-server 已就绪: http://{}:{}", host, port),
-                Lang::En => format!("llama-server ready: http://{}:{}", host, port),
+                Lang::Zh => format!("llama-server 已就绪: http://{}:{}", check_host, check_port),
+                Lang::En => format!("llama-server ready: http://{}:{}", check_host, check_port),
             };
             send(&ready_msg);
             let _ = log_sender.send(ServerEvent::Started(ServerProcess { child }));
@@ -208,13 +227,13 @@ pub fn start_server_async(
             let _ = child.wait();
             let fail_msg = if timed_out {
                 match lang {
-                    Lang::Zh => format!("启动失败: 等待 {}:{} 超时 ({}s)", host, port, timeout.as_secs()),
-                    Lang::En => format!("start failed: waiting for {}:{} timeout ({}s)", host, port, timeout.as_secs()),
+                    Lang::Zh => format!("启动失败: 等待 {}:{} 超时 ({}s)", check_host, check_port, timeout.as_secs()),
+                    Lang::En => format!("start failed: waiting for {}:{} timeout ({}s)", check_host, check_port, timeout.as_secs()),
                 }
             } else {
                 match lang {
-                    Lang::Zh => format!("启动失败: 端口 {}:{} 被占用", host, port),
-                    Lang::En => format!("start failed: port {}:{} in use", host, port),
+                    Lang::Zh => format!("启动失败: 端口 {}:{} 被占用", check_host, check_port),
+                    Lang::En => format!("start failed: port {}:{} in use", check_host, check_port),
                 }
             };
             let _ = log_sender.send(ServerEvent::Failed(fail_msg));

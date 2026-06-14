@@ -78,12 +78,14 @@ impl L10n {
     }
 
     t_str!(exec_filter, "可执行文件", "Executable");
-    t_str!(mtp, "MTP (Token 预测)", "MTP (Multi-Token Prediction)");
-    t_str!(flash_attn, "Flash Attention", "Flash Attn");
+    t_str!(mtp, "MTP", "MTP");
+    t_str!(flash_attn, "flash-attn", "flash-attn");
     t_str!(cmd_args, "命令行参数", "Command Line");
     t_str!(vision_model, "视觉模型", "Vision Model");
     t_str!(none, "无", "None");
     t_str!(profile_name, "配置名称", "Profile Name");
     t_str!(confirm, "确定", "Confirm");
     t_str!(cancel, "取消", "Cancel");
+    t_str!(route_mode, "路由模式", "Route Mode");
+    t_str!(models_max, "最大模型数", "Models Max");
 }

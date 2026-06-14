@@ -18,6 +18,8 @@ pub struct Config {
     pub flash_attn: String,
     pub command_text: String,
     pub mmproj: String,
+    pub route_mode: bool,
+    pub models_max: u32,
 }
 
 impl Default for Config {
@@ -35,6 +37,8 @@ impl Default for Config {
             flash_attn: "auto".to_string(),
             command_text: String::new(),
             mmproj: String::new(),
+            route_mode: false,
+            models_max: 1,
         }
     }
 }
@@ -121,6 +125,214 @@ pub fn delete_profile(name: &str) -> bool {
     fs::write(path, serde_json::to_string_pretty(&data).unwrap_or_default()).is_ok()
 }
 
+fn config_ini_path() -> PathBuf {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
+    exe.parent()
+        .unwrap_or(&PathBuf::from("."))
+        .join("config.ini")
+}
+
+pub fn config_ini_path_str() -> String {
+    config_ini_path().to_string_lossy().to_string()
+}
+
+fn build_wildcard_params(config: &Config) -> HashMap<String, String> {
+    let mut kvs = HashMap::new();
+    kvs.insert("n-gpu-layers".to_string(), config.n_gpu_layers.to_string());
+    kvs.insert("ctx-size".to_string(), config.ctx_size.to_string());
+    kvs.insert("models-max".to_string(), config.models_max.to_string());
+    if config.flash_attn != "auto" {
+        kvs.insert("flash-attn".to_string(), config.flash_attn.clone());
+    }
+    if config.mtp_enabled {
+        kvs.insert("spec-type".to_string(), "draft-mtp".to_string());
+        kvs.insert("spec-draft-n-max".to_string(), config.spec_draft_n_max.to_string());
+    }
+    kvs
+}
+
+fn build_ini_section(name: &str, config: &Config, extra_args: &str) -> String {
+    let model_name = if config.model_name.ends_with(".gguf") {
+        config.model_name.clone()
+    } else {
+        format!("{}.gguf", config.model_name)
+    };
+    let model_path = format!("{}/{}", config.model_dir.trim_end_matches('/'), model_name);
+    let mut lines = Vec::new();
+    lines.push(format!("[{}]", name));
+    lines.push(format!("model = {}", model_path));
+    if !config.mmproj.is_empty() {
+        lines.push(format!("mmproj = {}", config.mmproj));
+    }
+    lines.push(format!("n-gpu-layers = {}", config.n_gpu_layers));
+    lines.push(format!("ctx-size = {}", config.ctx_size));
+    if config.flash_attn != "auto" {
+        lines.push(format!("flash-attn = {}", config.flash_attn));
+    }
+    if config.mtp_enabled {
+        lines.push(format!("spec-type = draft-mtp"));
+        lines.push(format!("spec-draft-n-max = {}", config.spec_draft_n_max));
+    }
+    if !extra_args.is_empty() {
+        lines.push(format!("extra-args = {}", extra_args));
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn parse_sections(data: &str) -> Vec<(String, HashMap<String, String>)> {
+    let mut sections = Vec::new();
+    let mut current_name = String::new();
+    let mut current_kvs: HashMap<String, String> = HashMap::new();
+    for line in data.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            if !current_name.is_empty() {
+                sections.push((current_name.clone(), std::mem::take(&mut current_kvs)));
+            }
+            current_name = line[1..line.len()-1].to_string();
+        } else if let Some(eq_pos) = line.find('=') {
+            let key = line[..eq_pos].trim().to_string();
+            let val = line[eq_pos+1..].trim().to_string();
+            current_kvs.insert(key, val);
+        }
+    }
+    if !current_name.is_empty() {
+        sections.push((current_name, current_kvs));
+    }
+    sections
+}
+
+fn sections_to_ini(sections: &[(String, HashMap<String, String>)], with_version: bool) -> String {
+    let mut lines = Vec::new();
+    if with_version {
+        lines.push("# version = 1".to_string());
+        lines.push(String::new());
+    }
+    for (name, kvs) in sections {
+        lines.push(format!("[{}]", name));
+        let mut keys: Vec<&String> = kvs.keys().collect();
+        keys.sort();
+        for key in keys {
+            if let Some(val) = kvs.get(key) {
+                lines.push(format!("{} = {}", key, val));
+            }
+        }
+        lines.push(String::new());
+    }
+    lines.join("\n")
+}
+
+pub fn auto_generate_config_ini(config: &Config) -> bool {
+    let path = config_ini_path();
+
+    if path.exists() {
+        // ensure [*] section exists
+        if let Ok(data) = fs::read_to_string(&path) {
+            let sections = parse_sections(&data);
+            if !sections.iter().any(|(name, _)| name == "*") {
+                let mut all = sections.clone();
+                all.insert(0, ("*".to_string(), build_wildcard_params(config)));
+                return fs::write(&path, sections_to_ini(&all, true)).is_ok();
+            }
+        }
+        return true;
+    }
+
+    // ini does not exist — create with [*] only
+    let wildcard = build_wildcard_params(config);
+    let sections = vec![("*".to_string(), wildcard)];
+    fs::write(&path, sections_to_ini(&sections, true)).is_ok()
+}
+
+pub fn update_config_ini_profile(profile_name: &str, config: &Config, extra_args: &str) -> bool {
+    let models = list_models(&config.model_dir);
+    if !models.iter().any(|m| m == profile_name) {
+        return false;
+    }
+    let path = config_ini_path();
+    let new_section = build_ini_section(profile_name, config, extra_args);
+
+    let mut all_sections: Vec<(String, HashMap<String, String>)> = if path.exists() {
+        if let Ok(data) = fs::read_to_string(&path) {
+            parse_sections(&data)
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let new_kvs = {
+        let mut kvs = HashMap::new();
+        for line in new_section.lines() {
+            if let Some(eq_pos) = line.find('=') {
+                let key = line[..eq_pos].trim().to_string();
+                let val = line[eq_pos+1..].trim().to_string();
+                kvs.insert(key, val);
+            }
+        }
+        kvs
+    };
+
+    let mut found = false;
+    for (name, kvs) in &mut all_sections {
+        if *name == profile_name {
+            *kvs = new_kvs.clone();
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        all_sections.push((profile_name.to_string(), new_kvs));
+    }
+
+    fs::write(&path, sections_to_ini(&all_sections, false)).is_ok()
+}
+
+pub fn add_config_ini_section_if_missing(profile_name: &str, config: &Config, extra_args: &str) -> bool {
+    let models = list_models(&config.model_dir);
+    if !models.iter().any(|m| m == profile_name) {
+        return false;
+    }
+    let path = config_ini_path();
+    if !path.exists() {
+        return false;
+    }
+    if let Ok(data) = fs::read_to_string(&path) {
+        let sections = parse_sections(&data);
+        if sections.iter().any(|(name, _)| name == profile_name) {
+            return true;
+        }
+    } else {
+        return false;
+    }
+
+    // section missing — add it
+    let new_section = build_ini_section(profile_name, config, extra_args);
+    let mut all_sections: Vec<(String, HashMap<String, String>)> = if let Ok(data) = fs::read_to_string(&path) {
+        parse_sections(&data)
+    } else {
+        Vec::new()
+    };
+    let new_kvs = {
+        let mut kvs = HashMap::new();
+        for line in new_section.lines() {
+            if let Some(eq_pos) = line.find('=') {
+                let key = line[..eq_pos].trim().to_string();
+                let val = line[eq_pos+1..].trim().to_string();
+                kvs.insert(key, val);
+            }
+        }
+        kvs
+    };
+    all_sections.push((profile_name.to_string(), new_kvs));
+    fs::write(&path, sections_to_ini(&all_sections, false)).is_ok()
+}
+
 pub fn list_models(model_dir: &str) -> Vec<String> {
     let mut models = Vec::new();
     if let Ok(entries) = fs::read_dir(model_dir) {
@@ -149,4 +361,34 @@ pub fn list_mmproj_models(model_dir: &str) -> Vec<String> {
     }
     models.sort();
     models
+}
+
+pub fn extract_extra_args(command_text: &str) -> String {
+    let known_flags = ["-m", "--host", "--port", "-c", "--n-gpu-layers",
+                       "--spec-type", "--spec-draft-n-max", "--flash-attn", "--mmproj",
+                       "--models-preset", "--models-max"];
+    let tokens: Vec<&str> = command_text.split_whitespace().collect();
+    let mut extra = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if known_flags.contains(&tokens[i]) || tokens[i].starts_with("--flash-attn=") {
+            if tokens[i] == "--flash-attn" {
+                if let Some(next) = tokens.get(i + 1) {
+                    if *next == "on" || *next == "off" || *next == "auto" {
+                        i += 1;
+                    }
+                }
+            } else {
+                if let Some(_) = tokens.get(i + 1) {
+                    i += 1;
+                }
+            }
+        } else {
+            if i > 0 {
+                extra.push(tokens[i]);
+            }
+        }
+        i += 1;
+    }
+    extra.join(" ")
 }
