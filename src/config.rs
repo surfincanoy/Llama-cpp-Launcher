@@ -278,6 +278,12 @@ pub fn update_config_ini_profile(profile_name: &str, config: &Config, extra_args
         kvs
     };
 
+    for (name, kvs) in &all_sections {
+        if name == profile_name && *kvs == new_kvs {
+            return true;
+        }
+    }
+
     let mut found = false;
     for (name, kvs) in &mut all_sections {
         if *name == profile_name {
@@ -331,6 +337,65 @@ pub fn add_config_ini_section_if_missing(profile_name: &str, config: &Config, ex
     };
     all_sections.push((profile_name.to_string(), new_kvs));
     fs::write(&path, sections_to_ini(&all_sections, false)).is_ok()
+}
+
+pub fn sync_ini_model_sections(
+    models: &[String],
+    config: &Config,
+    extra_args: &str,
+    profiles: &HashMap<String, Config>,
+) -> bool {
+    let path = config_ini_path();
+    if !path.exists() {
+        return false;
+    }
+    let Ok(data) = fs::read_to_string(&path) else { return false };
+    let mut sections = parse_sections(&data);
+    let mut changed = false;
+    for model_name in models {
+        if model_name == "*" {
+            continue;
+        }
+        let (src_cfg, src_extra, from_profile) = if let Some(profile_cfg) = profiles.get(model_name) {
+            let extra = extract_extra_args(&profile_cfg.command_text);
+            (profile_cfg.clone(), extra, true)
+        } else {
+            (config.clone(), extra_args.to_string(), false)
+        };
+        let model_file = format!("{}.gguf", model_name);
+        let model_path = format!("{}/{}", src_cfg.model_dir.trim_end_matches('/'), model_file);
+        let mut kvs = HashMap::new();
+        kvs.insert("model".to_string(), model_path);
+        if !src_cfg.mmproj.is_empty() {
+            kvs.insert("mmproj".to_string(), src_cfg.mmproj.clone());
+        }
+        kvs.insert("n-gpu-layers".to_string(), src_cfg.n_gpu_layers.to_string());
+        kvs.insert("ctx-size".to_string(), src_cfg.ctx_size.to_string());
+        if src_cfg.flash_attn != "auto" {
+            kvs.insert("flash-attn".to_string(), src_cfg.flash_attn.clone());
+        }
+        if src_cfg.mtp_enabled {
+            kvs.insert("spec-type".to_string(), "draft-mtp".to_string());
+            kvs.insert("spec-draft-n-max".to_string(), src_cfg.spec_draft_n_max.to_string());
+        }
+        if !src_extra.is_empty() {
+            kvs.insert("extra-args".to_string(), src_extra);
+        }
+        if let Some(pos) = sections.iter().position(|(n, _)| n == model_name) {
+            if from_profile && sections[pos].1 != kvs {
+                sections[pos].1 = kvs;
+                changed = true;
+            }
+        } else {
+            sections.push((model_name.to_string(), kvs));
+            changed = true;
+        }
+    }
+    if changed {
+        fs::write(&path, sections_to_ini(&sections, true)).is_ok()
+    } else {
+        true
+    }
 }
 
 pub fn list_models(model_dir: &str) -> Vec<String> {

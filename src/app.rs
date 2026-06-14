@@ -92,7 +92,6 @@ impl Default for App {
             save_dialog_name: String::new(),
             show_load_dialog: false,
         };
-        app.sync_profile_sections();
         app
     }
 }
@@ -115,15 +114,6 @@ impl App {
         self.server_process.is_some()
     }
 
-    fn sync_profile_sections(&self) {
-        for (name, cfg) in &self.profiles {
-            if self.models.contains(name) {
-                let extra = config::extract_extra_args(&cfg.command_text);
-                config::add_config_ini_section_if_missing(name, cfg, &extra);
-            }
-        }
-    }
-
     fn apply_config(&mut self, profile_name: &str, cfg: &Config) {
         let old_dir = std::mem::take(&mut self.config.model_dir);
         self.config = cfg.clone();
@@ -137,7 +127,6 @@ impl App {
         if self.config.model_dir != old_dir && !self.config.model_dir.is_empty() {
             self.models = config::list_models(&self.config.model_dir);
             self.mmproj_models = config::list_mmproj_models(&self.config.model_dir);
-            config::auto_generate_config_ini(&self.config);
         }
     }
 
@@ -645,6 +634,7 @@ impl eframe::App for App {
                         let extra_args = self.extract_extra_args();
                         if self.config.route_mode {
                             config::auto_generate_config_ini(&self.config);
+                            config::sync_ini_model_sections(&self.models, &self.config, &extra_args, &self.profiles);
                         }
                         let msg = self.l10n.starting_server().to_string();
                         self.logs.clear();
