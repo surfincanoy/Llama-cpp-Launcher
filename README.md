@@ -9,41 +9,67 @@
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-blue?style=flat&logo=linux)
 ![egui](https://img.shields.io/badge/GUI-egui-purple?style=flat)
 
-![screenshot](screenshot.png)
-
 </div>
 
 [🇺🇸 English](README.md) | [🇨🇳 中文](README.zh-CN.md)
 
 ---
 
-## ✨ Features
+## Features
 
 | Feature | Description |
 |---------|-------------|
-| 🖥️ **GUI Configuration** | Visual configuration of llama-server without memorizing command-line parameters |
-| 💾 **Multi-Profile Management** | Save/load named configurations, switch between environments and models |
-| 🌐 **Auto Language Detection** | Automatically detects system language (Chinese/English) |
-| 🧠 **Advanced Parameters** | GPU layers, context size, Flash Attention, MTP Token Prediction |
-| 👁️ **Vision Model** | Support for mmproj vision model loading |
-| ⌨ **Command Line Preview** | Real-time command line display with manual extra-args editing |
-| 🚀 **One-Click Start/Stop** | Start/stop server with automatic health check and port conflict detection |
+| **GUI Configuration** | Visual configuration of llama-server without memorizing CLI flags |
+| **Multi-Profile Management** | Save/load named profiles, switch between environments and models |
+| **Route Mode** | Multi-model routing via `--models-preset` with auto-generated `config.ini` |
+| **Auto Language Detection** | Automatically detects system language (Chinese / English) |
+| **Advanced Parameters** | GPU layers, context size, Flash Attention, MTP, mmproj vision model |
+| **Command Line Preview** | Real-time CLI display, supports manual extra-args editing |
+| **One-Click Start/Stop** | Start/stop server with automatic health check and port conflict detection |
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
-1. **Select Executable** — Browse and select llama-server
+1. **Select Executable** — Browse and select `llama-server`
 2. **Select Model Directory** — Choose the folder containing your models
-3. **Select Model File** — Pick a model from the dropdown list
+3. **Select Model File** — Pick a model from the dropdown
 4. **Configure Parameters** — Port, GPU layers, context size, etc.
-5. **Start Server** — Click the「▶ Start」button
+5. **Enable Route Mode** (optional) — Check the route mode radio to run as a multi-model router
+6. **Start Server** — Click the **▶ Start** button
 
-> 💡 Configurations can be saved as named profiles for quick switching via「📂 Load」.
+> Profiles can be saved and loaded for quick environment switching.
 
 ---
 
-## 📦 Build
+## Route Mode
+
+When route mode is enabled, the launcher generates a `config.ini` file alongside the executable and starts `llama-server` with `--models-preset`. The router listens on port **8080** by default.
+
+**INI layout:**
+
+```ini
+# version = 1
+
+[*]
+n-gpu-layers = 30
+ctx-size = 4096
+models-max = 1
+
+[ModelName]
+model = /path/to/model.gguf
+n-gpu-layers = 30
+ctx-size = 4096
+extra-args = --no-warmup
+```
+
+- `[*]` section sets defaults for all models
+- Named sections are auto-created when saving a profile matching a model filename
+- `extra-args` in each section are forwarded to that model's instance
+
+---
+
+## Build
 
 ### Linux
 
@@ -60,24 +86,24 @@ Requires MinGW-w64:
 ```bash
 sudo apt install mingw-w64
 rustup target add x86_64-pc-windows-gnu
-./build.sh x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu
 ```
 
-Output: `target/x86_64-pc-windows-gnu/release/llamacpp-launcher-win-x86_64.exe`
+Output: `target/x86_64-pc-windows-gnu/release/llamacpp-launcher.exe`
 
 ### Release Optimizations
 
-`Cargo.toml` is configured with:
+`Cargo.toml` uses:
 - LTO (Link-Time Optimization)
-- Strip (debug symbols removed)
-- opt-level = "z" (minimal binary size)
-- codegen-units = 1
+- Strip (remove debug symbols)
+- `opt-level = "z"` (minimize binary size)
+- `codegen-units = 1`
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
-The config file `llamacpp_config.json` is saved alongside the executable with multi-profile support:
+Profiles are stored in `llamacpp_config.json` alongside the executable:
 
 ```json
 {
@@ -91,19 +117,21 @@ The config file `llamacpp_config.json` is saved alongside the executable with mu
     "port": 11433,
     "n_gpu_layers": 30,
     "ctx_size": 4096,
+    "models_max": 1,
     "flash_attn": "auto",
     "mtp_enabled": false,
     "spec_draft_n_max": 2,
+    "route_mode": false,
     "command_text": ""
   }
 }
 ```
 
-> ⚠️ Switching profiles does not auto-save current changes. Click「💾 Save」to persist.
+> Switching profiles does not auto-save current changes. Click **💾 Save** to persist.
 
 ---
 
-## 🧩 Dependencies
+## Dependencies
 
 ### Rust Crates
 
@@ -126,6 +154,6 @@ The config file `llamacpp_config.json` is saved alongside the executable with mu
 
 ---
 
-## 📄 License
+## License
 
 MIT License
